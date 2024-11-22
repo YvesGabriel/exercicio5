@@ -20,10 +20,23 @@ form {
   align-items: baseline;
 }
 
-button[type="submit"] {
-  padding: 5px 20px;
-  margin: 10px auto;
-  float: right;
+button{
+  display: inline-block;
+  padding: 10px 15px;
+  margin: 5px; 
+  background-color: #007bff;
+  color: #fff;
+  text-transform: uppercase;
+  font-size: 0.8em;
+  font-weight: bold;
+  text-decoration: none;
+  transition: background-color 0.3s ease;
+  border: none;
+  cursor: pointer;
+}
+
+.button:hover {
+  background-color: #0056b3;
 }
 
 #greeting {
@@ -34,4 +47,14 @@ button[type="submit"] {
 
 #greeting:empty {
   display: none;
+}
+
+.panel {
+  width: 50%; /* Define uma largura para a div */
+  margin: 0 auto; /* Centraliza horizontalmente */
+  display: flex; /* Ativa o modelo flexbox */
+  flex-direction: column; /* Organiza os itens em uma coluna */
+  align-items: center; /* Alinha os itens horizontalmente */
+  justify-content: center; /* Alinha os itens verticalmente */
+  text-align: center; /* Centraliza o texto dentro da div */  
 }

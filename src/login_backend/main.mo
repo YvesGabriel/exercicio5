@@ -1,5 +1,7 @@
+import Principal "mo:base/Principal";
+
 actor {
-  public query func greet(name : Text) : async Text {
-    return "Hello, " # name # "!";
+  public query (message) func get_principal_client() : async Text {
+    return "Principal: , " # Principal.toText(message.caller) # "!";
   };
 };
