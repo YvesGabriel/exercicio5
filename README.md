@@ -6,6 +6,12 @@ Observação: o projeto não trata o login em rede/base Local
 
 ## Para executar este projeto localmente utilize os seguintes comandos:
 
+Instale o pacote de segurança: 
+
+npm install --save @dfinity/auth-client
+
+Inicie o ICP
+
 dfx start --background
 
 dfx deploy
