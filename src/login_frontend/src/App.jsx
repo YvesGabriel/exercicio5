@@ -34,7 +34,8 @@ function App() {
           
           const principalText = await actorLoginBackend.get_principal_client();          
           setIsLoggedIn(true);
-          document.getElementById("principalText").innerText = principalText;        
+          document.getElementById("principalText").innerText = principalText;     
+          //O principal anônimo no Internet Computer é representado pelo valor textual "2vxsx-fae".   
 
         },
         
