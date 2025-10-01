@@ -1,0 +1,389 @@
+{
+  "name": "score",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -256,
+        -176
+      ],
+      "id": "2c01cc88-f7f4-4d54-880c-4835a574735e",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "numberInputs": 7
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        544,
+        -256
+      ],
+      "id": "5d58d2c1-71df-48e5-a9fa-b0f12b19b371",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// === Entrada ===\nconst i = $input.item.json;\n\n// Fallbacks para nomes ausentes do 9 e 10\nconst loanAmount = i.loan_amount ?? i.requested_amount ?? i.loanValue ?? 0;\nconst installments = i.installments ?? i.parcelas ?? 0;\n\n// ---------- 1) Pré-processamento e categorizações (CHAID-like manual) ----------\n// Obs.: Ajuste limiares conforme sua carteira. Estas faixas só inicializam a lógica.\n// O PDF trabalha com variáveis categorizadas e dummies (ver Tabela 13/Apêndices).\n\nfunction binSalary(v){\n  if (v == null) return \"missing\";\n  if (v < 1500) return \"<1500\";\n  if (v < 3000) return \"1500-2999\";\n  if (v < 6000) return \"3000-5999\";\n  if (v < 12000) return \"6000-11999\";\n  return \">=12000\";\n}\n\nfunction binBalance(v){\n  if (v == null) return \"missing\";\n  if (v < 0) return \"<0\";\n  if (v < 1000) return \"0-999\";\n  if (v < 5000) return \"1000-4999\";\n  if (v < 20000) return \"5000-19999\";\n  return \">=20000\";\n}\n\nfunction binAccountAgeMonths(iso){\n  if (!iso) return \"missing\";\n  const created = new Date(iso);\n  if (isNaN(created)) return \"missing\";\n  const now = new Date();\n  const months = (now.getFullYear()-created.getFullYear())*12 + (now.getMonth()-created.getMonth());\n  if (months < 3) return \"<3m\";\n  if (months < 12) return \"3-11m\";\n  if (months < 36) return \"12-35m\";\n  if (months < 72) return \"36-71m\";\n  return \">=72m\";\n}\n\nfunction catEmployment(v){\n  // padronize seus rótulos aqui\n  const t = (v||\"\").toString().toLowerCase();\n  if ([\"clt\",\"formal\",\"publico\",\"servidor\"].some(s=>t.includes(s))) return \"formal\";\n  if ([\"autonomo\",\"informal\",\"mei\",\"self\",\"freelancer\"].some(s=>t.includes(s))) return \"informal\";\n  if ([\"desemp\",\"sem\",\"unemploy\"].some(s=>t.includes(s))) return \"unemployed\";\n  return \"other\";\n}\n\nfunction catPayMethod(v){\n  const t = (v||\"\").toString().toLowerCase();\n  if (t.includes(\"pix\")) return \"pix\";\n  if (t.includes(\"credit\")) return \"cc\";\n  if (t.includes(\"déb\") || t.includes(\"deb\")) return \"debit\";\n  return \"other\";\n}\n\nfunction binDebtMonths(m){\n  if (!m || m<=0) return \"none\";\n  if (m <= 1) return \"≤1\";\n  if (m <= 3) return \"2-3\";\n  if (m <= 6) return \"4-6\";\n  return \">6\";\n}\n\nfunction binDebtRatio(value, salary){\n  const r = salary>0 ? value/salary : (value>0 ? 10 : 0);\n  if (r === 0) return \"0\";\n  if (r <= 0.5) return \"≤0.5\";\n  if (r <= 1) return \"0.5-1\";\n  if (r <= 2) return \"1-2\";\n  return \">2\";\n}\n\nfunction binAge(a){\n  if (a == null) return \"missing\";\n  if (a < 21) return \"<21\";\n  if (a < 30) return \"21-29\";\n  if (a < 45) return \"30-44\";\n  if (a < 60) return \"45-59\";\n  return \">=60\";\n}\n\nfunction binLoanAmount(v){\n  if (v == null) return \"missing\";\n  if (v < 500) return \"<500\";\n  if (v < 3000) return \"500-2999\";\n  if (v < 10000) return \"3000-9999\";\n  if (v < 30000) return \"10000-29999\";\n  return \">=30000\";\n}\n\nfunction binInstallments(n){\n  if (!n) return \"missing\";\n  if (n <= 6) return \"≤6\";\n  if (n <= 12) return \"7-12\";\n  if (n <= 24) return \"13-24\";\n  return \">24\";\n}\n\n// ---------- 2) Construção de dummies ----------\nconst X = {\n  salary_bin: binSalary(i.salary),\n  employment_cat: catEmployment(i.employment),\n  balance_bin: binBalance(i.amount),\n  paymethod_cat: catPayMethod(i.type),\n  account_age_bin: binAccountAgeMonths(i.account_created_at),\n  debt_months_bin: binDebtMonths(i.number_months),\n  debt_ratio_bin: binDebtRatio(i.value || 0, i.salary || 0),\n  age_bin: binAge(i.age),\n  loan_amount_bin: binLoanAmount(loanAmount),\n  installments_bin: binInstallments(installments),\n  // score atual entra como contínuo (normalizado a 0-1 se vier 0–1; se vier 0–1000, ajuste abaixo)\n  score_atual: i.score ?? 0,\n};\n\n// se seu \"score\" interno estiver em 0–1000, normalize:\nconst scoreAtualNorm = (X.score_atual > 1) ? Math.max(0, Math.min(1, X.score_atual/1000)) : Math.max(0, Math.min(1, X.score_atual));\n\n// ---------- 3) Coeficientes do modelo (AJUSTE COM SEUS DADOS!) ----------\n// Estrutura: coeficiente por categoria (dummy). A última categoria atua como base (coef=0), como no PDF.\n// Inicie com palpites e substitua pelos coeficientes estimados na sua regressão logística.\n\nconst coeffs = {\n  intercept: -0.5,                       // ajuste após treinar\n  salary_bin: { \"missing\": -0.3, \"<1500\": -0.6, \"1500-2999\": -0.3, \"3000-5999\": 0.1, \"6000-11999\": 0.3, \">=12000\": 0.5 },\n  employment_cat: { \"formal\": 0.4, \"informal\": -0.2, \"unemployed\": -0.6, \"other\": 0 }, // base \"other\"\n  balance_bin: { \"missing\": -0.2, \"<0\": -0.8, \"0-999\": -0.4, \"1000-4999\": -0.1, \"5000-19999\": 0.2, \">=20000\": 0.4 },\n  paymethod_cat: { \"pix\": 0.15, \"cc\": 0.05, \"debit\": 0.1, \"other\": 0 },\n  account_age_bin: { \"missing\": -0.2, \"<3m\": -0.5, \"3-11m\": -0.2, \"12-35m\": 0.1, \"36-71m\": 0.25, \">=72m\": 0.35 },\n  debt_months_bin: { \"none\": 0.3, \"≤1\": 0.05, \"2-3\": -0.2, \"4-6\": -0.5, \">6\": -0.9 },\n  debt_ratio_bin: { \"0\": 0.2, \"≤0.5\": 0.1, \"0.5-1\": -0.2, \"1-2\": -0.5, \">2\": -0.9 },\n  age_bin: { \"missing\": 0, \"<21\": -0.4, \"21-29\": -0.1, \"30-44\": 0.1, \"45-59\": 0.15, \">=60\": 0.05 },\n  loan_amount_bin: { \"missing\": 0, \"<500\": 0.15, \"500-2999\": 0.05, \"3000-9999\": -0.05, \"10000-29999\": -0.2, \">=30000\": -0.4 },\n  installments_bin: { \"missing\": 0, \"≤6\": 0.15, \"7-12\": 0.05, \"13-24\": -0.1, \">24\": -0.25 },\n  score_atual: 1.0,                       // peso do score já existente (se fizer sentido no seu negócio)\n};\n\n// ---------- 4) Equação logística (como no PDF): p = 1/(1+e^{-(β0 + ΣβX)}) ----------\nfunction logit(z){ return 1 / (1 + Math.exp(-z)); }\n\nlet z = coeffs.intercept;\nz += (coeffs.salary_bin[X.salary_bin] ?? 0);\nz += (coeffs.employment_cat[X.employment_cat] ?? 0);\nz += (coeffs.balance_bin[X.balance_bin] ?? 0);\nz += (coeffs.paymethod_cat[X.paymethod_cat] ?? 0);\nz += (coeffs.account_age_bin[X.account_age_bin] ?? 0);\nz += (coeffs.debt_months_bin[X.debt_months_bin] ?? 0);\nz += (coeffs.debt_ratio_bin[X.debt_ratio_bin] ?? 0);\nz += (coeffs.age_bin[X.age_bin] ?? 0);\nz += (coeffs.loan_amount_bin[X.loan_amount_bin] ?? 0);\nz += (coeffs.installments_bin[X.installments_bin] ?? 0);\nz += (coeffs.score_atual ?? 0) * scoreAtualNorm;\n\nconst pGood = logit(z);\n\n// ---------- 5) Score na escala do PDF: 0–100 ----------\nconst scoreCredito = Math.round(100 * pGood);\n\n// ---------- 6) Decisão usando score de corte (ajustável). Referência do PDF ~51.\nconst corte = 51; // ajuste ao seu trade-off\nconst aprovado = scoreCredito >= corte;\n\nreturn {\n  json: {\n    ...i,\n    features_used: X,\n    probability_good: Number(pGood.toFixed(4)),\n    scoreCredito,\n    aprovado,\n    rationale: {\n      corte_usado: corte,\n      criterio_bom_ruim: \"bom ≤60 dias de atraso; ruim ≥61 dias\",\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        -176
+      ],
+      "id": "def164a5-f2b0-413b-80c2-f39ffb7bf984",
+      "name": "calcular-score"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "users",
+        "filters": {
+          "conditions": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        -176
+      ],
+      "id": "3beba7da-962f-43fd-b990-a152224aa4b4",
+      "name": "Tabela users para consultar cpf",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "accounts",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -608
+      ],
+      "id": "ca0d9d30-d241-4426-9c02-e675dd3d71a9",
+      "name": "Tabela accounts",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "transactions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf_sender",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -448
+      ],
+      "id": "2da62f13-5ee8-41c5-abec-db14c3d0bb0b",
+      "name": "Tabela transactions",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "history_delay",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -80
+      ],
+      "id": "bfa764ac-08e7-48fa-ab63-d35255ae6a65",
+      "name": "Tabela history_delay",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "payment_methods",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        80
+      ],
+      "id": "d181b6c9-33d0-4c6b-9d60-8c9c0e51ea7b",
+      "name": "Tabela metódos de pagamento",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "sum_transactions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        256
+      ],
+      "id": "fd04b5e4-6de5-4920-9794-8a15b330ee87",
+      "name": "Tabela somatório de transações",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "credit_request",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "cpf",
+              "keyValue": "={{ $json.cpf }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -288
+      ],
+      "id": "48b7987e-a5a7-40bd-824b-31644869ad18",
+      "name": "Tabela resquested",
+      "credentials": {
+        "supabaseApi": {
+          "id": "mIPZZ1waqs1aEGBH",
+          "name": "Supabase account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Tabela users para consultar cpf",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "calcular-score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tabela users para consultar cpf": {
+      "main": [
+        [
+          {
+            "node": "Tabela transactions",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tabela metódos de pagamento",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tabela accounts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tabela somatório de transações",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tabela history_delay",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tabela resquested",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Tabela accounts": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tabela transactions": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Tabela history_delay": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Tabela metódos de pagamento": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "Tabela somatório de transações": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 6
+          }
+        ]
+      ]
+    },
+    "calcular-score": {
+      "main": [
+        []
+      ]
+    },
+    "Tabela resquested": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1532489b-405f-4434-87d6-ba725938f069",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d59c751807e4783ef5f8f48897e3fed07d79eb6bcdbc0f1d33a37e2fe0ac5831"
+  },
+  "id": "8d6U3WLGgKraBVEB",
+  "tags": []
+}
